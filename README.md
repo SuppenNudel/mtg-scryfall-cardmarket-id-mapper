@@ -8,6 +8,12 @@ It combines:
 - Name/set heuristics (including promo/token/art-series handling)
 - A local browser UI for manual review
 
+## UI Preview
+
+The review interface focuses on side-by-side printing comparison: Cardmarket images on one side, Scryfall candidates on the other, with quick accept/reject decisions and candidate filtering.
+
+![Printing comparison view](screenshots/printing-comparison-view.png)
+
 ## What This Project Produces
 
 Main generated outputs:
