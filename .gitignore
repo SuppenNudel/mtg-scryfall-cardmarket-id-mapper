@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Large local datasets (not suitable for regular git objects)
+default-cards-*.json
+products_singles_1.json
+review_data.json
+
+# Generated outputs
+cardmarket_expansion_map.json
+missing_cardmarket_id_mappings.csv
+missing_cardmarket_id_summary.json
+missing_cardmarket_review_by_set.md
+review_ui.html
