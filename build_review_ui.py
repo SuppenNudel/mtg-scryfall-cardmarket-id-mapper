@@ -1027,7 +1027,8 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     }
 
     function getAcceptedScryfallCandidate(row) {
-      if (getDecision(row.idProduct) !== 'accepted') return null;
+      const decision = getDecision(row.idProduct);
+      if (decision !== 'accepted' && decision !== 'replace') return null;
       const candidates = getScryfallCandidates(row);
       if (!candidates.length) return null;
       const saved = state.acceptedSelections[String(row.idProduct)];
@@ -1531,10 +1532,10 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       for (const r of acceptedRows) {
         const candidate = getAcceptedScryfallCandidate(r) || getActiveScryfallCandidate(r);
         const exportRow = {
-          name: r.name || '',
-          set: (candidate && candidate.set) || r.proposed_set || '',
-          cn: (candidate && candidate.collector_number) || r.proposed_collector_number || '',
-          scryfall_id: (candidate && candidate.id) || r.proposed_scryfall_id || '',
+          name: (candidate && candidate.name) || '',
+          set: (candidate && candidate.set) || '',
+          cn: (candidate && candidate.collector_number) || '',
+          scryfall_id: (candidate && candidate.id) || '',
           new_cardmarket_id: r.idProduct || ''
         };
         lines.push(toCsvRow(fields.map(f => exportRow[f])));
@@ -1553,10 +1554,10 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         const newId = String(r.idProduct || '');
         if (!newId || oldId === newId) continue;
         const exportRow = {
-          name: candidate.name || r.name || '',
-          set: candidate.set || r.proposed_set || '',
-          cn: candidate.collector_number || r.proposed_collector_number || '',
-          scryfall_id: candidate.id || r.proposed_scryfall_id || '',
+          name: candidate.name || '',
+          set: candidate.set || '',
+          cn: candidate.collector_number || '',
+          scryfall_id: candidate.id || '',
           old_cardmarket_id: oldId,
           new_cardmarket_id: newId,
         };
