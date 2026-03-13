@@ -152,6 +152,18 @@ def load_scryfall_candidate_index(
         if not set_code or not card_id:
             continue
 
+        card_faces = card.get("card_faces") if isinstance(card.get("card_faces"), list) else []
+        has_separate_back_image = False
+        if len(card_faces) > 1 and isinstance(card_faces[1], dict):
+          face_image_uris = card_faces[1].get("image_uris")
+          if isinstance(face_image_uris, dict):
+            has_separate_back_image = bool(
+              face_image_uris.get("normal")
+              or face_image_uris.get("large")
+              or face_image_uris.get("png")
+              or face_image_uris.get("small")
+            )
+
         candidate = {
             "id": card_id,
             "oracle_id": card.get("oracle_id", ""),
@@ -166,6 +178,7 @@ def load_scryfall_candidate_index(
             "finishes": card.get("finishes", []) if isinstance(card.get("finishes"), list) else [],
             "promo_types": card.get("promo_types", []) if isinstance(card.get("promo_types"), list) else [],
             "cardmarket_id": card.get("cardmarket_id") or None,
+            "has_separate_back_image": has_separate_back_image,
         }
         for variant in card_name_variants(card):
             buckets_by_set[(set_code, variant)][card_id] = candidate
@@ -321,6 +334,12 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       justify-content: center;
     }
     button { cursor: pointer; }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      filter: grayscale(0.35);
+      box-shadow: none;
+    }
     .primary { background: #bf5124; color: #fff; border-color: #b84b21; }
     .secondary { background: #2d6782; color: #fff; border-color: #295f79; }
 
@@ -354,6 +373,21 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     }
     .img-wrap img { max-width: 100%; max-height: 400px; object-fit: contain; }
     #mkmFrontImg, #mkmBackImg, #scryCurrentImg, #scryAcceptedImg { height: 520px; max-height: none; }
+    #scryCurrentWrap, #scryAcceptedWrap { position: relative; }
+    .scry-back-overlay {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      width: 34%;
+      max-width: 170px;
+      height: auto !important;
+      border: 2px solid #d7c9b3;
+      border-radius: 8px;
+      box-shadow: 0 6px 14px rgba(0, 0, 0, 0.2);
+      background: #fff;
+      z-index: 2;
+    }
+    .scry-back-overlay.hidden { display: none; }
     .mkm-preview-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -473,14 +507,21 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     .conf-low { background: #f7eddc; color: #7f5b2c; border-color: #edd8b8; }
     .conf-none { background: #f9e7e7; color: #8a3434; border-color: #efc8c8; }
     .decision-cell { display: flex; gap: 5px; flex-wrap: wrap; }
-    .tiny { font-size: 12px; padding: 5px 8px; border-radius: 8px; }
+    .tiny { font-size: 13px; padding: 8px 12px; border-radius: 9px; }
+    .tiny:disabled {
+      background: #ece7df !important;
+      border-color: #d6cdc0 !important;
+      color: #8b7f70 !important;
+    }
     .yes { background: #e1f4ea; border-color: #c0e5d1; }
+    .repbtn { background: #eee7f8; border-color: #d4c4ed; }
     .no { background: #fae7e7; border-color: #efc3c3; }
     .skip { background: #ecf0f4; border-color: #d6dee8; }
     .ignore { background: #f4efe6; border-color: #ddcfb7; }
     .row-note { color: var(--muted); font-size: 12px; }
     .decision-tag { font-weight: 700; }
     .accepted { color: #206a4a; }
+    .decision-tag.replace { color: #5f3c87; }
     .rejected { color: #9a2f2f; }
     .skipped { color: #55626e; }
     .ignored { color: #7b5a2f; }
@@ -537,6 +578,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         <option value=\"\">All decisions</option>
         <option value=\"unreviewed\">unreviewed</option>
         <option value=\"accepted\">accepted</option>
+        <option value=\"replace\">replace</option>
         <option value=\"rejected\">rejected</option>
         <option value=\"skipped\">skipped</option>
         <option value=\"ignored\">ignored</option>
@@ -547,6 +589,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         <option value=\"200\">200 / page</option>
       </select>
       <button class=\"primary\" id=\"exportAccepted\">Export accepted CSV</button>
+      <button class=\"secondary\" id=\"exportReplacements\">Export replacement CSV</button>
       <button class=\"secondary\" id=\"exportDecisions\">Export decisions JSON</button>
     </section>
 
@@ -559,6 +602,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       </div>
       <div class=\"compare-decision\">
         <button id=\"compareAccept\" class=\"tiny yes\">Accept</button>
+        <button id=\"compareReplace\" class=\"tiny repbtn\">Replace</button>
         <button id=\"compareReject\" class=\"tiny no\">Reject</button>
         <button id=\"compareSkip\" class=\"tiny skip\">Skip</button>
         <button id=\"compareIgnore\" class=\"tiny ignore\">Ignore</button>
@@ -592,11 +636,17 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
           <div class="scry-preview-grid">
             <div class="scry-preview-col">
               <div class="scry-preview-label">Current selected candidate</div>
-              <div id="scryCurrentWrap" class="img-wrap scry-primary"><img id="scryCurrentImg" alt="Current selected Scryfall card image" /></div>
+              <div id="scryCurrentWrap" class="img-wrap scry-primary">
+                <img id="scryCurrentImg" alt="Current selected Scryfall card image" />
+                <img id="scryCurrentBackImg" class="scry-back-overlay hidden" alt="Back face preview" />
+              </div>
             </div>
             <div class="scry-preview-col">
               <div class="scry-preview-label">Accepted mapping</div>
-              <div id="scryAcceptedWrap" class="img-wrap scry-primary"><img id="scryAcceptedImg" alt="Accepted Scryfall mapping image" /></div>
+              <div id="scryAcceptedWrap" class="img-wrap scry-primary">
+                <img id="scryAcceptedImg" alt="Accepted Scryfall mapping image" />
+                <img id="scryAcceptedBackImg" class="scry-back-overlay hidden" alt="Accepted mapping back face preview" />
+              </div>
             </div>
           </div>
           <div style=\"margin-top:8px; display:flex; justify-content:flex-start; gap:8px; flex-wrap:wrap;\">
@@ -807,10 +857,46 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       return state.decisions[String(idProduct)] || '';
     }
 
+    function validateDecision(row, value) {
+      const candidate = getActiveScryfallCandidate(row);
+      const hasExistingCardmarketId = !!(candidate && candidate.cardmarket_id);
+      const selectedMatchesCurrent = hasExistingCardmarketId && String(candidate.cardmarket_id) === String(row.idProduct);
+      if ((value === 'accepted' || value === 'replace') && selectedMatchesCurrent) {
+        return {
+          ok: false,
+          message: 'Accept/Replace disabled: selected Scryfall printing already points to this Cardmarket product ID.'
+        };
+      }
+      if (value === 'accepted' && hasExistingCardmarketId) {
+        return {
+          ok: false,
+          message: 'Accept is disabled for this selection because the chosen Scryfall printing already has a Cardmarket ID. Use Replace instead.'
+        };
+      }
+      if (value === 'replace' && !hasExistingCardmarketId) {
+        return {
+          ok: false,
+          message: 'Replace is only available when the selected Scryfall printing already has a Cardmarket ID.'
+        };
+      }
+      return { ok: true, message: '' };
+    }
+
     function setDecision(idProduct, value) {
-      state.decisions[String(idProduct)] = value;
       const row = getRowByIdProduct(idProduct);
-      if (value === 'accepted' && row) {
+      if (!row) return false;
+
+      const validation = validateDecision(row, value);
+      if (!validation.ok) {
+        if (String(state.selectedIdProduct) === String(idProduct)) {
+          const status = document.getElementById('compareDecisionStatus');
+          if (status) status.textContent = validation.message;
+        }
+        return false;
+      }
+
+      state.decisions[String(idProduct)] = value;
+      if (value === 'accepted' || value === 'replace') {
         state.acceptedSelections[String(idProduct)] = getScryfallCandidateIndex(row);
       } else {
         delete state.acceptedSelections[String(idProduct)];
@@ -819,21 +905,47 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       saveAcceptedSelections();
       if (String(state.selectedIdProduct) === String(idProduct)) {
         renderCompareById(idProduct);
-        return;
+        return true;
       }
       renderCompareDecisionState();
       renderTable();
+      return true;
     }
 
     function renderCompareDecisionState() {
       const status = document.getElementById('compareDecisionStatus');
       if (!status) return;
+      const acceptBtn = document.getElementById('compareAccept');
+      const replaceBtn = document.getElementById('compareReplace');
       if (!state.selectedIdProduct) {
         status.textContent = 'Current decision: unreviewed';
+        if (acceptBtn) acceptBtn.disabled = true;
+        if (replaceBtn) replaceBtn.disabled = true;
         return;
       }
       const decision = getDecision(state.selectedIdProduct) || 'unreviewed';
       status.textContent = `Current decision: ${decision}`;
+
+      const row = getRowByIdProduct(state.selectedIdProduct);
+      const candidate = row ? getActiveScryfallCandidate(row) : null;
+      const hasExistingCardmarketId = !!(candidate && candidate.cardmarket_id);
+      const selectedMatchesCurrent = hasExistingCardmarketId && row && String(candidate.cardmarket_id) === String(row.idProduct);
+      if (acceptBtn) {
+        acceptBtn.disabled = hasExistingCardmarketId || selectedMatchesCurrent;
+        acceptBtn.title = selectedMatchesCurrent
+          ? 'Accept disabled: selected Scryfall printing already maps to this Cardmarket ID'
+          : (hasExistingCardmarketId
+              ? 'Accept disabled: selected Scryfall printing already has a Cardmarket ID'
+              : '');
+      }
+      if (replaceBtn) {
+        replaceBtn.disabled = !hasExistingCardmarketId || selectedMatchesCurrent;
+        replaceBtn.title = selectedMatchesCurrent
+          ? 'Replace disabled: selected Scryfall printing already maps to this Cardmarket ID'
+          : (hasExistingCardmarketId
+              ? 'Mark as replacement'
+              : 'Replace requires a selected Scryfall printing with an existing Cardmarket ID');
+      }
     }
 
     function getRowByIdProduct(idProduct) {
@@ -882,6 +994,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
           nonfoil: false,
           finishes: [],
           promo_types: [],
+          has_separate_back_image: false,
         }];
       }
       return [];
@@ -940,6 +1053,12 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       return `https://cards.scryfall.io/${size}/front/${id[0]}/${id[1]}/${id}.jpg`;
     }
 
+    function scryfallBackImageUrl(scryfallId, size = 'normal') {
+      if (!scryfallId) return '';
+      const id = String(scryfallId).toLowerCase();
+      return `https://cards.scryfall.io/${size}/back/${id[0]}/${id[1]}/${id}.jpg`;
+    }
+
     function getVisibleScryfallCandidates(candidates, filterSetCode = '') {
       let toShow = candidates;
       if (filterSetCode) {
@@ -969,17 +1088,17 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         const setCode = esc(candidate.set || '');
         const collector = esc(candidate.collector_number || '');
         const titleText = hasCardmarketId
-          ? `Already has Cardmarket ID: ${candidate.cardmarket_id} (read-only)`
+          ? `Already has Cardmarket ID: ${candidate.cardmarket_id} (click to select replacement target)`
           : `Select ${setCode} #${collector}`;
         return `
-          <button class="scry-candidate${active}${alreadyMappedClass}" data-scry-index="${origIdx}" ${hasCardmarketId ? 'disabled' : ''} title="${titleText}">
+          <button class="scry-candidate${active}${alreadyMappedClass}" data-scry-index="${origIdx}" title="${titleText}">
             <img src="${thumb}" alt="Scryfall candidate ${origIdx + 1}" loading="lazy" />
             <div class="scry-candidate-meta">${setCode} #${collector}</div>
           </button>
         `;
       }).join('');
 
-      for (const btn of wrap.querySelectorAll('button[data-scry-index]:not([disabled])')) {
+      for (const btn of wrap.querySelectorAll('button[data-scry-index]')) {
         btn.addEventListener('click', () => {
           const next = Number(btn.getAttribute('data-scry-index'));
           if (!Number.isNaN(next)) setScryfallCandidateIndex(row.idProduct, next);
@@ -1170,16 +1289,42 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       renderScryfallCandidates(row, scryfallCandidates, state.scryfallCandidateIndex, state.scryfallSetFilter);
 
       const scryCurrentImg = document.getElementById('scryCurrentImg');
+      const scryCurrentBackImg = document.getElementById('scryCurrentBackImg');
       const scryAcceptedImg = document.getElementById('scryAcceptedImg');
+      const scryAcceptedBackImg = document.getElementById('scryAcceptedBackImg');
       const scryMeta = document.getElementById('scryMeta');
       const scryfallLink = document.getElementById('openScryfallCard');
       const currentUrl = activeCandidate ? scryfallImageUrl(activeCandidate.id) : '';
+      const currentBackUrl = (activeCandidate && activeCandidate.has_separate_back_image)
+        ? scryfallBackImageUrl(activeCandidate.id)
+        : '';
       const acceptedCandidate = getAcceptedScryfallCandidate(row);
       const acceptedUrl = acceptedCandidate ? scryfallImageUrl(acceptedCandidate.id) : '';
+      const acceptedBackUrl = (acceptedCandidate && acceptedCandidate.has_separate_back_image)
+        ? scryfallBackImageUrl(acceptedCandidate.id)
+        : '';
 
       if (currentUrl && activeCandidate) {
         if (scryCurrentImg) scryCurrentImg.src = currentUrl;
+        if (scryCurrentBackImg) {
+          if (currentBackUrl) {
+            scryCurrentBackImg.src = currentBackUrl;
+            scryCurrentBackImg.classList.remove('hidden');
+          } else {
+            scryCurrentBackImg.src = '';
+            scryCurrentBackImg.classList.add('hidden');
+          }
+        }
         if (scryAcceptedImg) scryAcceptedImg.src = acceptedUrl || scryPlaceholderImage('Not mapped yet');
+        if (scryAcceptedBackImg) {
+          if (acceptedBackUrl) {
+            scryAcceptedBackImg.src = acceptedBackUrl;
+            scryAcceptedBackImg.classList.remove('hidden');
+          } else {
+            scryAcceptedBackImg.src = '';
+            scryAcceptedBackImg.classList.add('hidden');
+          }
+        }
         scryfallLink.href = scryfallCardPageUrl(activeCandidate);
         scryfallLink.textContent = activeCandidate.set && activeCandidate.collector_number
           ? `Open Scryfall: ${activeCandidate.set} ${activeCandidate.collector_number}`
@@ -1203,7 +1348,20 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         scryMeta.innerHTML = metaLines.join('<br>');
       } else {
         if (scryCurrentImg) scryCurrentImg.src = scryPlaceholderImage('No current Scryfall card');
+        if (scryCurrentBackImg) {
+          scryCurrentBackImg.src = '';
+          scryCurrentBackImg.classList.add('hidden');
+        }
         if (scryAcceptedImg) scryAcceptedImg.src = acceptedUrl || scryPlaceholderImage('Not mapped yet');
+        if (scryAcceptedBackImg) {
+          if (acceptedBackUrl) {
+            scryAcceptedBackImg.src = acceptedBackUrl;
+            scryAcceptedBackImg.classList.remove('hidden');
+          } else {
+            scryAcceptedBackImg.src = '';
+            scryAcceptedBackImg.classList.add('hidden');
+          }
+        }
         scryfallLink.href = 'https://scryfall.com';
         scryfallLink.textContent = 'Open Scryfall page';
         scryMeta.textContent = 'No proposed Scryfall image URL.';
@@ -1234,15 +1392,16 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     function renderStats() {
       const total = state.rows.length;
       const accepted = Object.values(state.decisions).filter(v => v === 'accepted').length;
+      const replaced = Object.values(state.decisions).filter(v => v === 'replace').length;
       const rejected = Object.values(state.decisions).filter(v => v === 'rejected').length;
       const skipped = Object.values(state.decisions).filter(v => v === 'skipped').length;
       const ignored = Object.values(state.decisions).filter(v => v === 'ignored').length;
-      const reviewed = accepted + rejected + skipped + ignored;
+      const reviewed = accepted + replaced + rejected + skipped + ignored;
       const byConf = { high: 0, medium: 0, low: 0, none: 0 };
       for (const r of state.rows) byConf[r.confidence] = (byConf[r.confidence] || 0) + 1;
       const cards = [
         ['Total rows', total], ['Reviewed', reviewed], ['Accepted', accepted], ['Rejected', rejected],
-        ['Skipped', skipped], ['Ignored', ignored], ['High', byConf.high], ['Medium', byConf.medium], ['Low', byConf.low], ['None', byConf.none]
+        ['Replaced', replaced], ['Skipped', skipped], ['Ignored', ignored], ['High', byConf.high], ['Medium', byConf.medium], ['Low', byConf.low], ['None', byConf.none]
       ];
       document.getElementById('stats').innerHTML = cards
         .map(([k, v]) => `<div class=\"stat\"><div class=\"k\">${esc(k)}</div><div class=\"v\">${esc(v)}</div></div>`)
@@ -1286,6 +1445,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
               <div>${decisionTag}</div>
               <div class=\"decision-cell\">
                 <button class=\"tiny yes\" data-id=\"${r.idProduct}\" data-d=\"accepted\">Accept</button>
+                <button class="tiny repbtn" data-id="${r.idProduct}" data-d="replace">Replace</button>
                 <button class=\"tiny no\" data-id=\"${r.idProduct}\" data-d=\"rejected\">Reject</button>
                 <button class=\"tiny skip\" data-id=\"${r.idProduct}\" data-d=\"skipped\">Skip</button>
                 <button class=\"tiny ignore\" data-id=\"${r.idProduct}\" data-d=\"ignored\">Ignore</button>
@@ -1382,6 +1542,29 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       downloadText('accepted_mappings.csv', lines.join(String.fromCharCode(10)), 'text/csv;charset=utf-8');
     }
 
+    function exportReplacements() {
+      const fields = ['name', 'set', 'cn', 'scryfall_id', 'old_cardmarket_id', 'new_cardmarket_id'];
+      const replaceRows = state.rows.filter(r => getDecision(r.idProduct) === 'replace');
+      const lines = [toCsvRow(fields)];
+      for (const r of replaceRows) {
+        const candidate = getAcceptedScryfallCandidate(r) || getActiveScryfallCandidate(r);
+        if (!candidate || !candidate.cardmarket_id) continue;
+        const oldId = String(candidate.cardmarket_id);
+        const newId = String(r.idProduct || '');
+        if (!newId || oldId === newId) continue;
+        const exportRow = {
+          name: candidate.name || r.name || '',
+          set: candidate.set || r.proposed_set || '',
+          cn: candidate.collector_number || r.proposed_collector_number || '',
+          scryfall_id: candidate.id || r.proposed_scryfall_id || '',
+          old_cardmarket_id: oldId,
+          new_cardmarket_id: newId,
+        };
+        lines.push(toCsvRow(fields.map(f => exportRow[f])));
+      }
+      downloadText('replacement_mappings.csv', lines.join(String.fromCharCode(10)), 'text/csv;charset=utf-8');
+    }
+
     function exportDecisions() {
       const payload = {
         exportedAt: new Date().toISOString(),
@@ -1407,6 +1590,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       });
 
       document.getElementById('exportAccepted').addEventListener('click', exportAccepted);
+      document.getElementById('exportReplacements').addEventListener('click', exportReplacements);
       document.getElementById('exportDecisions').addEventListener('click', exportDecisions);
 
       document.getElementById('saveMkmCode').addEventListener('click', () => {
@@ -1498,26 +1682,27 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
 
       document.getElementById('compareAccept').addEventListener('click', () => {
         if (!state.selectedIdProduct) return;
-        setDecision(state.selectedIdProduct, 'accepted');
-        navigateToNext();
+        if (setDecision(state.selectedIdProduct, 'accepted')) navigateToNext();
+      });
+
+      document.getElementById('compareReplace').addEventListener('click', () => {
+        if (!state.selectedIdProduct) return;
+        if (setDecision(state.selectedIdProduct, 'replace')) navigateToNext();
       });
 
       document.getElementById('compareReject').addEventListener('click', () => {
         if (!state.selectedIdProduct) return;
-        setDecision(state.selectedIdProduct, 'rejected');
-        navigateToNext();
+        if (setDecision(state.selectedIdProduct, 'rejected')) navigateToNext();
       });
 
       document.getElementById('compareSkip').addEventListener('click', () => {
         if (!state.selectedIdProduct) return;
-        setDecision(state.selectedIdProduct, 'skipped');
-        navigateToNext();
+        if (setDecision(state.selectedIdProduct, 'skipped')) navigateToNext();
       });
 
       document.getElementById('compareIgnore').addEventListener('click', () => {
         if (!state.selectedIdProduct) return;
-        setDecision(state.selectedIdProduct, 'ignored');
-        navigateToNext();
+        if (setDecision(state.selectedIdProduct, 'ignored')) navigateToNext();
       });
     }
 
