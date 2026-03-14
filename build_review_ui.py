@@ -320,7 +320,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; }
     .stat .v { font-size: 20px; font-weight: 700; }
 
-    .controls { display: grid; grid-template-columns: 1.8fr 1fr 1fr 1fr 1fr auto auto; gap: 8px; margin: 12px 0; }
+    .controls { display: grid; grid-template-columns: 1.8fr 1fr 1fr 1fr 1fr auto auto auto; gap: 8px; margin: 12px 0; }
     input, select, button, a.btn {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -589,6 +589,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         <option value=\"200\">200 / page</option>
       </select>
       <button class=\"primary\" id=\"exportAccepted\">Export accepted CSV</button>
+      <button class=\"secondary\" id=\"reviewDuplicateScryfall\">Review duplicate Scryfall IDs</button>
       <button class=\"secondary\" id=\"exportReplacements\">Export replacement CSV</button>
       <button class=\"secondary\" id=\"exportDecisions\">Export decisions JSON</button>
     </section>
@@ -606,6 +607,8 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         <button id=\"compareReject\" class=\"tiny no\">Reject</button>
         <button id=\"compareSkip\" class=\"tiny skip\">Skip</button>
         <button id=\"compareIgnore\" class=\"tiny ignore\">Ignore</button>
+        <button id=\"comparePrevious\" class=\"tiny ghost\">Previous</button>
+        <button id=\"compareNext\" class=\"tiny ghost\">Next</button>
         <span id=\"compareDecisionStatus\" class=\"compare-status\">Current decision: unreviewed</span>
       </div>
       <div class=\"compare-grid\">
@@ -733,6 +736,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       mkmCandidateIndex: 0,
       mkmRenderToken: 0,
       scryfallCandidateIndex: 0,
+      focusIdProducts: null,
     };
 
     function esc(s) {
@@ -857,6 +861,71 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       return state.decisions[String(idProduct)] || '';
     }
 
+    function collectAcceptedExportRows() {
+      const acceptedRows = state.rows.filter(r => getDecision(r.idProduct) === 'accepted');
+      return acceptedRows.map(r => {
+        const candidate = getAcceptedScryfallCandidate(r) || getActiveScryfallCandidate(r);
+        return {
+          sourceRow: r,
+          candidate,
+          exportRow: {
+            name: (candidate && candidate.name) || '',
+            set: (candidate && candidate.set) || '',
+            cn: (candidate && candidate.collector_number) || '',
+            scryfall_id: (candidate && candidate.id) || '',
+            new_cardmarket_id: r.idProduct || ''
+          }
+        };
+      });
+    }
+
+    function findDuplicateAcceptedScryfallIds(items) {
+      const byScryfallId = new Map();
+      for (const item of items) {
+        const id = String(item.exportRow.scryfall_id || '').trim().toLowerCase();
+        if (!id) continue;
+        if (!byScryfallId.has(id)) byScryfallId.set(id, []);
+        byScryfallId.get(id).push(item);
+      }
+      return Array.from(byScryfallId.entries())
+        .map(([scryfallId, rows]) => ({ scryfallId, rows }))
+        .filter(group => group.rows.length > 1)
+        .sort((a, b) => b.rows.length - a.rows.length || a.scryfallId.localeCompare(b.scryfallId));
+    }
+
+    function reviewDuplicateAcceptedScryfallIds() {
+      const accepted = collectAcceptedExportRows();
+      const duplicates = findDuplicateAcceptedScryfallIds(accepted);
+      if (!duplicates.length) {
+        alert('No duplicate Scryfall IDs found among accepted mappings.');
+        return false;
+      }
+
+      const focused = [];
+      for (const group of duplicates) {
+        for (const item of group.rows) {
+          focused.push(String(item.sourceRow.idProduct));
+        }
+      }
+
+      state.focusIdProducts = new Set(focused);
+      state.decision = 'accepted';
+      const decisionFilter = document.getElementById('decisionFilter');
+      if (decisionFilter) decisionFilter.value = 'accepted';
+      applyFilters();
+
+      if (state.filtered.length > 0) {
+        renderCompareById(state.filtered[0].idProduct);
+      }
+
+      const status = document.getElementById('compareDecisionStatus');
+      if (status) {
+        const duplicateRows = duplicates.reduce((sum, group) => sum + group.rows.length, 0);
+        status.textContent = `Duplicate review mode: ${duplicates.length} duplicate Scryfall IDs across ${duplicateRows} accepted rows.`;
+      }
+      return true;
+    }
+
     function validateDecision(row, value) {
       const candidate = getActiveScryfallCandidate(row);
       const hasExistingCardmarketId = !!(candidate && candidate.cardmarket_id);
@@ -897,7 +966,10 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
 
       state.decisions[String(idProduct)] = value;
       if (value === 'accepted' || value === 'replace') {
-        state.acceptedSelections[String(idProduct)] = getScryfallCandidateIndex(row);
+        const activeCandidate = getActiveScryfallCandidate(row);
+        state.acceptedSelections[String(idProduct)] = activeCandidate && activeCandidate.id
+          ? String(activeCandidate.id)
+          : getScryfallCandidateIndex(row);
       } else {
         delete state.acceptedSelections[String(idProduct)];
       }
@@ -1013,10 +1085,35 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       const candidates = getScryfallCandidates(row);
       if (!candidates.length) return 0;
       const saved = state.scryfallSelections[String(row.idProduct)];
+
+      if (typeof saved === 'string' && saved) {
+        const idxById = candidates.findIndex(c => String(c.id || '') === saved);
+        if (idxById >= 0) return idxById;
+      }
+
+      if (Number.isInteger(saved)) {
+        // Legacy persistence stored indexes; resolve against the full name-matched pool first,
+        // then map back to the current candidate list by stable card ID.
+        const allCandidates = getAllScryfallCandidatesForName(row);
+        if (allCandidates.length) {
+          const legacyNormalized = ((saved % allCandidates.length) + allCandidates.length) % allCandidates.length;
+          const legacyCandidate = allCandidates[legacyNormalized];
+          if (legacyCandidate && legacyCandidate.id) {
+            const idxByLegacyId = candidates.findIndex(c => String(c.id || '') === String(legacyCandidate.id));
+            if (idxByLegacyId >= 0) {
+              state.scryfallSelections[String(row.idProduct)] = String(legacyCandidate.id);
+              saveScryfallSelections();
+              return idxByLegacyId;
+            }
+          }
+        }
+        return ((saved % candidates.length) + candidates.length) % candidates.length;
+      }
+
       const initialDefault = getDecision(row.idProduct) === 'rejected'
         ? Number(row.initial_all_scryfall_candidate_index || 0)
         : Number(row.initial_scryfall_candidate_index || 0);
-      const initial = Number.isInteger(saved) ? saved : initialDefault;
+      const initial = initialDefault;
       return ((initial % candidates.length) + candidates.length) % candidates.length;
     }
 
@@ -1029,13 +1126,34 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     function getAcceptedScryfallCandidate(row) {
       const decision = getDecision(row.idProduct);
       if (decision !== 'accepted' && decision !== 'replace') return null;
+
+      const saved = state.acceptedSelections[String(row.idProduct)];
+
+      if (typeof saved === 'string' && saved) {
+        const allCandidates = getAllScryfallCandidatesForName(row);
+        const found = allCandidates.find(c => String(c.id || '') === saved);
+        if (found) return found;
+      }
+
       const candidates = getScryfallCandidates(row);
       if (!candidates.length) return null;
-      const saved = state.acceptedSelections[String(row.idProduct)];
-      if (!Number.isInteger(saved)) return null;
-      const idx = saved;
-      const normalized = ((idx % candidates.length) + candidates.length) % candidates.length;
-      return candidates[normalized];
+
+      if (Number.isInteger(saved)) {
+        const allCandidates = getAllScryfallCandidatesForName(row);
+        if (allCandidates.length) {
+          const legacyNormalized = ((saved % allCandidates.length) + allCandidates.length) % allCandidates.length;
+          const legacyCandidate = allCandidates[legacyNormalized];
+          if (legacyCandidate && legacyCandidate.id) {
+            state.acceptedSelections[String(row.idProduct)] = String(legacyCandidate.id);
+            saveAcceptedSelections();
+            return legacyCandidate;
+          }
+        }
+        const normalized = ((saved % candidates.length) + candidates.length) % candidates.length;
+        return candidates[normalized];
+      }
+
+      return null;
     }
 
     function setScryfallCandidateIndex(idProduct, nextIndex) {
@@ -1043,7 +1161,11 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       if (!row) return;
       const candidates = getScryfallCandidates(row);
       if (!candidates.length) return;
-      state.scryfallSelections[String(idProduct)] = ((nextIndex % candidates.length) + candidates.length) % candidates.length;
+      const normalized = ((nextIndex % candidates.length) + candidates.length) % candidates.length;
+      const selected = candidates[normalized];
+      state.scryfallSelections[String(idProduct)] = selected && selected.id
+        ? String(selected.id)
+        : normalized;
       saveScryfallSelections();
       renderCompareById(idProduct);
     }
@@ -1262,10 +1384,31 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       const scryfallCandidates = getScryfallCandidates(row);
       state.scryfallCandidateIndex = getScryfallCandidateIndex(row);
 
+      // Migrate legacy numeric current-selection state to stable Scryfall IDs.
+      const savedCurrentSelection = state.scryfallSelections[String(row.idProduct)];
+      if (Number.isInteger(savedCurrentSelection) && scryfallCandidates.length) {
+        const activeAfterResolve = getActiveScryfallCandidate(row);
+        if (activeAfterResolve && activeAfterResolve.id) {
+          state.scryfallSelections[String(row.idProduct)] = String(activeAfterResolve.id);
+          saveScryfallSelections();
+          state.scryfallCandidateIndex = getScryfallCandidateIndex(row);
+        }
+      }
+
       // Backfill accepted selection for legacy accepted rows that predate acceptedSelections persistence.
-      if (getDecision(row.idProduct) === 'accepted' && !Number.isInteger(state.acceptedSelections[String(row.idProduct)])) {
-        state.acceptedSelections[String(row.idProduct)] = state.scryfallCandidateIndex;
+      if ((getDecision(row.idProduct) === 'accepted' || getDecision(row.idProduct) === 'replace') && !state.acceptedSelections[String(row.idProduct)]) {
+        const activeForBackfill = getActiveScryfallCandidate(row);
+        state.acceptedSelections[String(row.idProduct)] = activeForBackfill && activeForBackfill.id
+          ? String(activeForBackfill.id)
+          : state.scryfallCandidateIndex;
         saveAcceptedSelections();
+      } else if (Number.isInteger(state.acceptedSelections[String(row.idProduct)])) {
+        // Migrate legacy numeric accepted-selection state to stable Scryfall IDs.
+        const acceptedCandidate = getAcceptedScryfallCandidate(row);
+        if (acceptedCandidate && acceptedCandidate.id) {
+          state.acceptedSelections[String(row.idProduct)] = String(acceptedCandidate.id);
+          saveAcceptedSelections();
+        }
       }
 
       const activeCandidate = getActiveScryfallCandidate(row);
@@ -1390,6 +1533,23 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       renderCompareById(nextRow.idProduct);
     }
 
+    function navigateToPrevious() {
+      const status = document.getElementById('compareDecisionStatus');
+      if (!state.selectedIdProduct || !state.filtered.length) {
+        if (status) status.textContent = 'No previous card to review.';
+        return;
+      }
+      const idx = state.filtered.findIndex(r => String(r.idProduct) === String(state.selectedIdProduct));
+      if (idx <= 0) {
+        if (status) status.textContent = 'No previous card to review.';
+        return;
+      }
+      const previousRow = state.filtered[idx - 1];
+      const previousPage = Math.floor((idx - 1) / state.pageSize) + 1;
+      if (previousPage !== state.page) { state.page = previousPage; renderTable(); }
+      renderCompareById(previousRow.idProduct);
+    }
+
     function renderStats() {
       const total = state.rows.length;
       const accepted = Object.values(state.decisions).filter(v => v === 'accepted').length;
@@ -1400,9 +1560,14 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       const reviewed = accepted + replaced + rejected + skipped + ignored;
       const byConf = { high: 0, medium: 0, low: 0, none: 0 };
       for (const r of state.rows) byConf[r.confidence] = (byConf[r.confidence] || 0) + 1;
+      const acceptedForExport = collectAcceptedExportRows();
+      const duplicateAccepted = findDuplicateAcceptedScryfallIds(acceptedForExport);
+      const duplicateAcceptedRows = duplicateAccepted.reduce((sum, group) => sum + group.rows.length, 0);
       const cards = [
         ['Total rows', total], ['Reviewed', reviewed], ['Accepted', accepted], ['Rejected', rejected],
-        ['Replaced', replaced], ['Skipped', skipped], ['Ignored', ignored], ['High', byConf.high], ['Medium', byConf.medium], ['Low', byConf.low], ['None', byConf.none]
+        ['Replaced', replaced], ['Skipped', skipped], ['Ignored', ignored],
+        ['Accepted duplicate rows', duplicateAcceptedRows], ['Duplicate Scryfall IDs', duplicateAccepted.length],
+        ['High', byConf.high], ['Medium', byConf.medium], ['Low', byConf.low], ['None', byConf.none]
       ];
       document.getElementById('stats').innerHTML = cards
         .map(([k, v]) => `<div class=\"stat\"><div class=\"k\">${esc(k)}</div><div class=\"v\">${esc(v)}</div></div>`)
@@ -1416,6 +1581,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
         if (state.set && String(r.idExpansion ?? '') !== state.set) return false;
         const d = getDecision(r.idProduct) || 'unreviewed';
         if (state.decision && d !== state.decision) return false;
+        if (state.focusIdProducts && !state.focusIdProducts.has(String(r.idProduct))) return false;
         if (!q) return true;
         const blob = [r.idProduct, r.idMetacard, r.idExpansion, r.expansion_name, r.name, r.reason, r.proposed_set, r.mapped_set, r.proposed_scryfall_id].join(' ').toLowerCase();
         return blob.includes(q);
@@ -1527,18 +1693,20 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
 
     function exportAccepted() {
       const fields = ['name', 'set', 'cn', 'scryfall_id', 'new_cardmarket_id'];
-      const acceptedRows = state.rows.filter(r => getDecision(r.idProduct) === 'accepted');
+      const acceptedRows = collectAcceptedExportRows();
+      const duplicateGroups = findDuplicateAcceptedScryfallIds(acceptedRows);
+      if (duplicateGroups.length) {
+        const duplicateRows = duplicateGroups.reduce((sum, group) => sum + group.rows.length, 0);
+        alert(
+          `Export blocked: found ${duplicateGroups.length} duplicate Scryfall IDs across ${duplicateRows} accepted rows. ` +
+          'Use "Review duplicate Scryfall IDs" to resolve conflicts first.'
+        );
+        reviewDuplicateAcceptedScryfallIds();
+        return;
+      }
       const lines = [toCsvRow(fields)];
-      for (const r of acceptedRows) {
-        const candidate = getAcceptedScryfallCandidate(r) || getActiveScryfallCandidate(r);
-        const exportRow = {
-          name: (candidate && candidate.name) || '',
-          set: (candidate && candidate.set) || '',
-          cn: (candidate && candidate.collector_number) || '',
-          scryfall_id: (candidate && candidate.id) || '',
-          new_cardmarket_id: r.idProduct || ''
-        };
-        lines.push(toCsvRow(fields.map(f => exportRow[f])));
+      for (const item of acceptedRows) {
+        lines.push(toCsvRow(fields.map(f => item.exportRow[f])));
       }
       downloadText('accepted_mappings.csv', lines.join(String.fromCharCode(10)), 'text/csv;charset=utf-8');
     }
@@ -1578,10 +1746,26 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
     }
 
     function bindControls() {
-      document.getElementById('searchInput').addEventListener('input', e => { state.search = e.target.value || ''; applyFilters(); });
-      document.getElementById('confidenceFilter').addEventListener('change', e => { state.confidence = e.target.value || ''; applyFilters(); });
-      document.getElementById('setFilter').addEventListener('change', e => { state.set = e.target.value || ''; applyFilters(); });
-      document.getElementById('decisionFilter').addEventListener('change', e => { state.decision = e.target.value || ''; applyFilters(); });
+      document.getElementById('searchInput').addEventListener('input', e => {
+        state.focusIdProducts = null;
+        state.search = e.target.value || '';
+        applyFilters();
+      });
+      document.getElementById('confidenceFilter').addEventListener('change', e => {
+        state.focusIdProducts = null;
+        state.confidence = e.target.value || '';
+        applyFilters();
+      });
+      document.getElementById('setFilter').addEventListener('change', e => {
+        state.focusIdProducts = null;
+        state.set = e.target.value || '';
+        applyFilters();
+      });
+      document.getElementById('decisionFilter').addEventListener('change', e => {
+        state.focusIdProducts = null;
+        state.decision = e.target.value || '';
+        applyFilters();
+      });
       document.getElementById('pageSize').addEventListener('change', e => { state.pageSize = Number(e.target.value) || 100; renderTable(); });
       document.getElementById('prevPage').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); renderTable(); });
       document.getElementById('nextPage').addEventListener('click', () => {
@@ -1591,6 +1775,7 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       });
 
       document.getElementById('exportAccepted').addEventListener('click', exportAccepted);
+      document.getElementById('reviewDuplicateScryfall').addEventListener('click', reviewDuplicateAcceptedScryfallIds);
       document.getElementById('exportReplacements').addEventListener('click', exportReplacements);
       document.getElementById('exportDecisions').addEventListener('click', exportDecisions);
 
@@ -1704,6 +1889,14 @@ def build_html(data_json_name: str, title: str, embedded_rows_json: str):
       document.getElementById('compareIgnore').addEventListener('click', () => {
         if (!state.selectedIdProduct) return;
         if (setDecision(state.selectedIdProduct, 'ignored')) navigateToNext();
+      });
+
+      document.getElementById('compareNext').addEventListener('click', () => {
+        navigateToNext();
+      });
+
+      document.getElementById('comparePrevious').addEventListener('click', () => {
+        navigateToPrevious();
       });
     }
 

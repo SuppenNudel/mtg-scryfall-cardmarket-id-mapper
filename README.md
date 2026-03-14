@@ -71,7 +71,11 @@ python review_server.py --host localhost --port 8000
 
 4. Review rows in the browser and mark decisions (`accepted`, `rejected`, etc.).
 
-5. Export accepted rows via **Export accepted CSV**.
+5. If you suspect duplicate accepted mappings, use **Review duplicate Scryfall IDs** to jump directly to conflicting accepted rows and fix them.
+
+6. Export accepted rows via **Export accepted CSV**.
+
+The accepted export now blocks when duplicate `scryfall_id` values are still present among accepted rows.
 
 Current accepted export columns:
 - `name,set,cn,scryfall_id,new_cardmarket_id`
@@ -125,6 +129,8 @@ The server also proxies Cardmarket image URLs via `/mkm-image` to reduce browser
 - Review decisions are stored in browser `localStorage` for the page origin.
 - Use the same host consistently (`localhost` vs `127.0.0.1`) to avoid "missing" decisions caused by origin mismatch.
 - You can export decisions JSON from the UI as a backup.
+- The compare panel includes `Previous` / `Next` navigation buttons to move between rows without changing decisions.
+- `Current selected candidate` and `Accepted mapping` are intentionally separate: changing the current candidate does not change the accepted mapping until you click `Accept`/`Replace` again.
 
 ## Repository Files (Core)
 
