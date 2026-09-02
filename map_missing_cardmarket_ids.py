@@ -197,7 +197,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--cards",
-        default="default-cards-20260312090730.json",
+        default="default-cards-20260312090730.jsonl",
         help="Path to Scryfall default cards JSON.",
     )
     parser.add_argument(
@@ -261,7 +261,7 @@ def main() -> None:
                 manual_overrides = {}
 
     with cards_path.open("r", encoding="utf-8") as f:
-        all_cards = json.load(f)
+        all_cards = [json.loads(card) for card in f]
 
     with products_path.open("r", encoding="utf-8") as f:
         products_wrapper = json.load(f)
